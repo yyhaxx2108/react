@@ -111,10 +111,11 @@ function defineRefPropWarningGetter(props, displayName) {
 const ReactElement = function(type, key, ref, self, source, owner, props) {
   const element = {
     // This tag allows us to uniquely identify this as a React Element
+    // 标示 element 是什么类型的
     $$typeof: REACT_ELEMENT_TYPE,
 
     // Built-in properties that belong on the element
-    type: type,
+    type: type,  // 记录节点类型
     key: key,
     ref: ref,
     props: props,
@@ -168,6 +169,12 @@ const ReactElement = function(type, key, ref, self, source, owner, props) {
  * Create and return a new ReactElement of the given type.
  * See https://reactjs.org/docs/react-api.html#createelement
  */
+/**
+ * 
+ * @param {*} type 节点类型
+ * @param {*} config attrs
+ * @param {*} children 标签子标签
+ */
 export function createElement(type, config, children) {
   let propName;
 
@@ -191,6 +198,7 @@ export function createElement(type, config, children) {
     source = config.__source === undefined ? null : config.__source;
     // Remaining properties are added to a new props object
     for (propName in config) {
+      // 排除 ref、key、__self、__source
       if (
         hasOwnProperty.call(config, propName) &&
         !RESERVED_PROPS.hasOwnProperty(propName)
@@ -202,10 +210,12 @@ export function createElement(type, config, children) {
 
   // Children can be more than one argument, and those are transferred onto
   // the newly allocated props object.
+  // 这里 children 是可以存在多个的
   const childrenLength = arguments.length - 2;
   if (childrenLength === 1) {
     props.children = children;
   } else if (childrenLength > 1) {
+    // Array 和 new Array 效果是相同的
     const childArray = Array(childrenLength);
     for (let i = 0; i < childrenLength; i++) {
       childArray[i] = arguments[i + 2];

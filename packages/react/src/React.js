@@ -47,6 +47,7 @@ import {
 import ReactSharedInternals from './ReactSharedInternals';
 import {enableStableConcurrentModeAPIs} from 'shared/ReactFeatureFlags';
 
+// 定义了 React 对象
 const React = {
   Children: {
     map,
@@ -105,4 +106,5 @@ if (enableStableConcurrentModeAPIs) {
   React.unstable_Profiler = undefined;
 }
 
+// 将定义的 React 对象暴露出去
 export default React;
