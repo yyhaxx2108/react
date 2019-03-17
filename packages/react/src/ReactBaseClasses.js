@@ -56,6 +56,7 @@ Component.prototype.isReactComponent = {};
  * @protected
  */
 Component.prototype.setState = function(partialState, callback) {
+  // 判断 partialState 是否为正确的类型 
   invariant(
     typeof partialState === 'object' ||
       typeof partialState === 'function' ||
