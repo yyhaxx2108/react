@@ -14,27 +14,35 @@
  * environment.
  */
 
-import type {Fiber} from 'react-reconciler/src/ReactFiber';
+import type {Fiber} from 'react-reconciler/src/ReactInternalTypes';
 import type {UpdateQueue} from 'react-reconciler/src/ReactUpdateQueue';
 import type {ReactNodeList} from 'shared/ReactTypes';
+import type {RootTag} from 'react-reconciler/src/ReactRootTags';
 
 import * as Scheduler from 'scheduler/unstable_mock';
-import {createPortal} from 'shared/ReactPortal';
-import expect from 'expect';
 import {REACT_FRAGMENT_TYPE, REACT_ELEMENT_TYPE} from 'shared/ReactSymbols';
-import warningWithoutStack from 'shared/warningWithoutStack';
-
-// for .act's return value
-type Thenable = {
-  then(resolve: () => mixed, reject?: () => mixed): mixed,
-};
+import {
+  ConcurrentRoot,
+  BlockingRoot,
+  LegacyRoot,
+} from 'react-reconciler/src/ReactRootTags';
 
 type Container = {
   rootID: string,
   children: Array<Instance | TextInstance>,
   pendingChildren: Array<Instance | TextInstance>,
+  ...
 };
-type Props = {prop: any, hidden: boolean, children?: mixed};
+type Props = {
+  prop: any,
+  hidden: boolean,
+  children?: mixed,
+  bottom?: null | number,
+  left?: null | number,
+  right?: null | number,
+  top?: null | number,
+  ...
+};
 type Instance = {|
   type: string,
   id: number,
@@ -145,6 +153,10 @@ function createReactNoop(reconciler: Function, useMutation: boolean) {
       throw new Error('insertBefore() first argument is not an instance.');
     }
     insertInContainerOrInstanceBefore(parentInstance, child, beforeChild);
+  }
+
+  function clearContainer(container: Container): void {
+    container.children.splice(0);
   }
 
   function removeChildFromContainerOrInstance(
@@ -307,7 +319,7 @@ function createReactNoop(reconciler: Function, useMutation: boolean) {
       type: string,
       oldProps: Props,
       newProps: Props,
-    ): null | {} {
+    ): null | {...} {
       if (type === 'errorInCompletePhase') {
         throw new Error('Error in host config.');
       }
@@ -355,14 +367,104 @@ function createReactNoop(reconciler: Function, useMutation: boolean) {
     cancelTimeout: clearTimeout,
     noTimeout: -1,
 
-    prepareForCommit(): void {},
+    prepareForCommit(): null | Object {
+      return null;
+    },
 
     resetAfterCommit(): void {},
 
     now: Scheduler.unstable_now,
 
     isPrimaryRenderer: true,
+    warnsIfNotActing: true,
     supportsHydration: false,
+
+    DEPRECATED_mountResponderInstance(): void {
+      // NO-OP
+    },
+
+    DEPRECATED_unmountResponderInstance(): void {
+      // NO-OP
+    },
+
+    getFundamentalComponentInstance(fundamentalInstance): Instance {
+      const {impl, props, state} = fundamentalInstance;
+      return impl.getInstance(null, props, state);
+    },
+
+    mountFundamentalComponent(fundamentalInstance): void {
+      const {impl, instance, props, state} = fundamentalInstance;
+      const onMount = impl.onUpdate;
+      if (onMount !== undefined) {
+        onMount(null, instance, props, state);
+      }
+    },
+
+    shouldUpdateFundamentalComponent(fundamentalInstance): boolean {
+      const {impl, instance, prevProps, props, state} = fundamentalInstance;
+      const shouldUpdate = impl.shouldUpdate;
+      if (shouldUpdate !== undefined) {
+        return shouldUpdate(null, instance, prevProps, props, state);
+      }
+      return true;
+    },
+
+    updateFundamentalComponent(fundamentalInstance): void {
+      const {impl, instance, prevProps, props, state} = fundamentalInstance;
+      const onUpdate = impl.onUpdate;
+      if (onUpdate !== undefined) {
+        onUpdate(null, instance, prevProps, props, state);
+      }
+    },
+
+    unmountFundamentalComponent(fundamentalInstance): void {
+      const {impl, instance, props, state} = fundamentalInstance;
+      const onUnmount = impl.onUnmount;
+      if (onUnmount !== undefined) {
+        onUnmount(null, instance, props, state);
+      }
+    },
+
+    cloneFundamentalInstance(fundamentalInstance): Instance {
+      const instance = fundamentalInstance.instance;
+      return {
+        children: [],
+        text: instance.text,
+        type: instance.type,
+        prop: instance.prop,
+        id: instance.id,
+        context: instance.context,
+        hidden: instance.hidden,
+      };
+    },
+
+    getInstanceFromNode() {
+      throw new Error('Not yet implemented.');
+    },
+
+    removeInstanceEventHandles(instance: any): void {
+      // NO-OP
+    },
+
+    beforeActiveInstanceBlur() {
+      // NO-OP
+    },
+
+    afterActiveInstanceBlur() {
+      // NO-OP
+    },
+
+    preparePortalMount() {
+      // NO-OP
+    },
+
+    prepareScopeUpdate() {},
+
+    removeScopeEventHandles() {},
+
+    getInstanceFromScope() {
+      throw new Error('Not yet implemented.');
+    },
   };
 
   const hostConfig = useMutation
@@ -412,6 +514,7 @@ function createReactNoop(reconciler: Function, useMutation: boolean) {
         insertInContainerBefore,
         removeChild,
         removeChildFromContainer,
+        clearContainer,
 
         hideInstance(instance: Instance): void {
           instance.hidden = true;
@@ -441,6 +544,7 @@ function createReactNoop(reconciler: Function, useMutation: boolean) {
         supportsPersistence: true,
 
         cloneInstance,
+        clearContainer,
 
         createContainerChildSet(
           container: Container,
@@ -460,6 +564,13 @@ function createReactNoop(reconciler: Function, useMutation: boolean) {
           newChildren: Array<Instance | TextInstance>,
         ): void {
           container.pendingChildren = newChildren;
+          if (
+            newChildren.length === 1 &&
+            newChildren[0].text === 'Error when completing root'
+          ) {
+            // Trigger an error for testing purposes
+            throw Error('Error when completing root');
+          }
         },
 
         replaceContainerChildren(
@@ -572,77 +683,173 @@ function createReactNoop(reconciler: Function, useMutation: boolean) {
     return textInstance.text;
   }
 
+  function getChildren(root) {
+    if (root) {
+      return root.children;
+    } else {
+      return null;
+    }
+  }
+
+  function getPendingChildren(root) {
+    if (root) {
+      return root.pendingChildren;
+    } else {
+      return null;
+    }
+  }
+
+  function getChildrenAsJSX(root) {
+    const children = childToJSX(getChildren(root), null);
+    if (children === null) {
+      return null;
+    }
+    if (Array.isArray(children)) {
+      return {
+        $$typeof: REACT_ELEMENT_TYPE,
+        type: REACT_FRAGMENT_TYPE,
+        key: null,
+        ref: null,
+        props: {children},
+        _owner: null,
+        _store: __DEV__ ? {} : undefined,
+      };
+    }
+    return children;
+  }
+
+  function getPendingChildrenAsJSX(root) {
+    const children = childToJSX(getChildren(root), null);
+    if (children === null) {
+      return null;
+    }
+    if (Array.isArray(children)) {
+      return {
+        $$typeof: REACT_ELEMENT_TYPE,
+        type: REACT_FRAGMENT_TYPE,
+        key: null,
+        ref: null,
+        props: {children},
+        _owner: null,
+        _store: __DEV__ ? {} : undefined,
+      };
+    }
+    return children;
+  }
+
+  let idCounter = 0;
+
   const ReactNoop = {
     _Scheduler: Scheduler,
 
     getChildren(rootID: string = DEFAULT_ROOT_ID) {
       const container = rootContainers.get(rootID);
-      if (container) {
-        return container.children;
-      } else {
-        return null;
-      }
+      return getChildren(container);
     },
 
     getPendingChildren(rootID: string = DEFAULT_ROOT_ID) {
       const container = rootContainers.get(rootID);
-      if (container) {
-        return container.pendingChildren;
-      } else {
-        return null;
-      }
+      return getPendingChildren(container);
     },
 
-    getOrCreateRootContainer(
-      rootID: string = DEFAULT_ROOT_ID,
-      isConcurrent: boolean = false,
-    ) {
+    getOrCreateRootContainer(rootID: string = DEFAULT_ROOT_ID, tag: RootTag) {
       let root = roots.get(rootID);
       if (!root) {
         const container = {rootID: rootID, pendingChildren: [], children: []};
         rootContainers.set(rootID, container);
-        root = NoopRenderer.createContainer(container, isConcurrent, false);
+        root = NoopRenderer.createContainer(container, tag, false, null);
         roots.set(rootID, root);
       }
       return root.current.stateNode.containerInfo;
     },
 
+    // TODO: Replace ReactNoop.render with createRoot + root.render
+    createRoot() {
+      const container = {
+        rootID: '' + idCounter++,
+        pendingChildren: [],
+        children: [],
+      };
+      const fiberRoot = NoopRenderer.createContainer(
+        container,
+        ConcurrentRoot,
+        false,
+        null,
+      );
+      return {
+        _Scheduler: Scheduler,
+        render(children: ReactNodeList) {
+          NoopRenderer.updateContainer(children, fiberRoot, null, null);
+        },
+        getChildren() {
+          return getChildren(container);
+        },
+        getChildrenAsJSX() {
+          return getChildrenAsJSX(container);
+        },
+      };
+    },
+
+    createBlockingRoot() {
+      const container = {
+        rootID: '' + idCounter++,
+        pendingChildren: [],
+        children: [],
+      };
+      const fiberRoot = NoopRenderer.createContainer(
+        container,
+        BlockingRoot,
+        false,
+        null,
+      );
+      return {
+        _Scheduler: Scheduler,
+        render(children: ReactNodeList) {
+          NoopRenderer.updateContainer(children, fiberRoot, null, null);
+        },
+        getChildren() {
+          return getChildren(container);
+        },
+        getChildrenAsJSX() {
+          return getChildrenAsJSX(container);
+        },
+      };
+    },
+
+    createLegacyRoot() {
+      const container = {
+        rootID: '' + idCounter++,
+        pendingChildren: [],
+        children: [],
+      };
+      const fiberRoot = NoopRenderer.createContainer(
+        container,
+        LegacyRoot,
+        false,
+        null,
+      );
+      return {
+        _Scheduler: Scheduler,
+        render(children: ReactNodeList) {
+          NoopRenderer.updateContainer(children, fiberRoot, null, null);
+        },
+        getChildren() {
+          return getChildren(container);
+        },
+        getChildrenAsJSX() {
+          return getChildrenAsJSX(container);
+        },
+      };
+    },
+
     getChildrenAsJSX(rootID: string = DEFAULT_ROOT_ID) {
-      const children = childToJSX(ReactNoop.getChildren(rootID), null);
-      if (children === null) {
-        return null;
-      }
-      if (Array.isArray(children)) {
-        return {
-          $$typeof: REACT_ELEMENT_TYPE,
-          type: REACT_FRAGMENT_TYPE,
-          key: null,
-          ref: null,
-          props: {children},
-          _owner: null,
-          _store: __DEV__ ? {} : undefined,
-        };
-      }
-      return children;
+      const container = rootContainers.get(rootID);
+      return getChildrenAsJSX(container);
     },
 
     getPendingChildrenAsJSX(rootID: string = DEFAULT_ROOT_ID) {
-      const children = childToJSX(ReactNoop.getPendingChildren(rootID), null);
-      if (children === null) {
-        return null;
-      }
-      if (Array.isArray(children)) {
-        return {
-          $$typeof: REACT_ELEMENT_TYPE,
-          type: REACT_FRAGMENT_TYPE,
-          key: null,
-          ref: null,
-          props: {children},
-          _owner: null,
-          _store: __DEV__ ? {} : undefined,
-        };
-      }
-      return children;
+      const container = rootContainers.get(rootID);
+      return getPendingChildrenAsJSX(container);
     },
 
     createPortal(
@@ -650,7 +857,7 @@ function createReactNoop(reconciler: Function, useMutation: boolean) {
       container: Container,
       key: ?string = null,
     ) {
-      return createPortal(children, container, null, key);
+      return NoopRenderer.createPortal(children, container, null, key);
     },
 
     // Shortcut for testing a single root
@@ -660,11 +867,7 @@ function createReactNoop(reconciler: Function, useMutation: boolean) {
 
     renderLegacySyncRoot(element: React$Element<any>, callback: ?Function) {
       const rootID = DEFAULT_ROOT_ID;
-      const isConcurrent = false;
-      const container = ReactNoop.getOrCreateRootContainer(
-        rootID,
-        isConcurrent,
-      );
+      const container = ReactNoop.getOrCreateRootContainer(rootID, LegacyRoot);
       const root = roots.get(container.rootID);
       NoopRenderer.updateContainer(element, root, null, callback);
     },
@@ -674,10 +877,9 @@ function createReactNoop(reconciler: Function, useMutation: boolean) {
       rootID: string,
       callback: ?Function,
     ) {
-      const isConcurrent = true;
       const container = ReactNoop.getOrCreateRootContainer(
         rootID,
-        isConcurrent,
+        ConcurrentRoot,
       );
       const root = roots.get(container.rootID);
       NoopRenderer.updateContainer(element, root, null, callback);
@@ -733,7 +935,7 @@ function createReactNoop(reconciler: Function, useMutation: boolean) {
       hostUpdateCounter = 0;
       hostCloneCounter = 0;
       try {
-        Scheduler.flushAll();
+        Scheduler.unstable_flushAll();
         return useMutation
           ? {
               hostDiffCounter,
@@ -750,7 +952,7 @@ function createReactNoop(reconciler: Function, useMutation: boolean) {
       }
     },
 
-    expire: Scheduler.advanceTime,
+    expire: Scheduler.unstable_advanceTime,
 
     flushExpired(): Array<mixed> {
       return Scheduler.unstable_flushExpired();
@@ -762,69 +964,29 @@ function createReactNoop(reconciler: Function, useMutation: boolean) {
 
     unbatchedUpdates: NoopRenderer.unbatchedUpdates,
 
-    interactiveUpdates: NoopRenderer.interactiveUpdates,
+    discreteUpdates: NoopRenderer.discreteUpdates,
 
-    // maybe this should exist only in the test file
-    act(callback: () => void): Thenable {
-      // note: keep these warning messages in sync with
-      // ReactTestRenderer.js and ReactTestUtils.js
-      let result = NoopRenderer.batchedUpdates(callback);
-      if (__DEV__) {
-        if (result !== undefined) {
-          let addendum;
-          if (result !== null && typeof result.then === 'function') {
-            addendum =
-              "\n\nIt looks like you wrote ReactNoop.act(async () => ...) or returned a Promise from it's callback. " +
-              'Putting asynchronous logic inside ReactNoop.act(...) is not supported.\n';
-          } else {
-            addendum = ' You returned: ' + result;
-          }
-          warningWithoutStack(
-            false,
-            'The callback passed to ReactNoop.act(...) function must not return anything.%s',
-            addendum,
-          );
-        }
-      }
-      ReactNoop.flushPassiveEffects();
-      // we want the user to not expect a return,
-      // but we want to warn if they use it like they can await on it.
-      return {
-        then() {
-          if (__DEV__) {
-            warningWithoutStack(
-              false,
-              'Do not await the result of calling ReactNoop.act(...), it is not a Promise.',
-            );
-          }
-        },
-      };
-    },
+    flushDiscreteUpdates: NoopRenderer.flushDiscreteUpdates,
 
     flushSync(fn: () => mixed) {
       NoopRenderer.flushSync(fn);
     },
 
-    flushPassiveEffects() {
-      // Trick to flush passive effects without exposing an internal API:
-      // Create a throwaway root and schedule a dummy update on it.
-      const rootID = 'bloopandthenmoreletterstoavoidaconflict';
-      const container = {rootID: rootID, pendingChildren: [], children: []};
-      rootContainers.set(rootID, container);
-      const root = NoopRenderer.createContainer(container, true, false);
-      NoopRenderer.updateContainer(null, root, null, null);
-    },
+    flushPassiveEffects: NoopRenderer.flushPassiveEffects,
+
+    act: NoopRenderer.act,
 
     // Logs the current state of the tree.
     dumpTree(rootID: string = DEFAULT_ROOT_ID) {
       const root = roots.get(rootID);
       const rootContainer = rootContainers.get(rootID);
       if (!root || !rootContainer) {
+        // eslint-disable-next-line react-internal/no-production-logging
         console.log('Nothing rendered yet.');
         return;
       }
 
-      let bufferedLog = [];
+      const bufferedLog = [];
       function log(...args) {
         bufferedLog.push(...args, '\n');
       }
@@ -853,20 +1015,29 @@ function createReactNoop(reconciler: Function, useMutation: boolean) {
 
       function logUpdateQueue(updateQueue: UpdateQueue<mixed>, depth) {
         log('  '.repeat(depth + 1) + 'QUEUED UPDATES');
-        const firstUpdate = updateQueue.firstUpdate;
-        if (!firstUpdate) {
-          return;
+        const first = updateQueue.firstBaseUpdate;
+        const update = first;
+        if (update !== null) {
+          do {
+            log(
+              '  '.repeat(depth + 1) + '~',
+              '[' + update.expirationTime + ']',
+            );
+          } while (update !== null);
         }
 
-        log(
-          '  '.repeat(depth + 1) + '~',
-          '[' + firstUpdate.expirationTime + ']',
-        );
-        while (firstUpdate.next) {
-          log(
-            '  '.repeat(depth + 1) + '~',
-            '[' + firstUpdate.expirationTime + ']',
-          );
+        const lastPending = updateQueue.shared.pending;
+        if (lastPending !== null) {
+          const firstPending = lastPending.next;
+          const pendingUpdate = firstPending;
+          if (pendingUpdate !== null) {
+            do {
+              log(
+                '  '.repeat(depth + 1) + '~',
+                '[' + pendingUpdate.expirationTime + ']',
+              );
+            } while (pendingUpdate !== null && pendingUpdate !== firstPending);
+          }
         }
       }
 
@@ -909,32 +1080,8 @@ function createReactNoop(reconciler: Function, useMutation: boolean) {
       log('FIBERS:');
       logFiber(root.current, 0);
 
+      // eslint-disable-next-line react-internal/no-production-logging
       console.log(...bufferedLog);
-    },
-
-    flushWithoutCommitting(
-      expectedFlush: Array<mixed>,
-      rootID: string = DEFAULT_ROOT_ID,
-    ) {
-      const root: any = roots.get(rootID);
-      const expiration = NoopRenderer.computeUniqueAsyncExpiration();
-      const batch = {
-        _defer: true,
-        _expirationTime: expiration,
-        _onComplete: () => {
-          root.firstBatch = null;
-        },
-        _next: null,
-      };
-      root.firstBatch = batch;
-      Scheduler.unstable_flushWithoutYielding();
-      const actual = Scheduler.unstable_clearYields();
-      expect(actual).toEqual(expectedFlush);
-      return (expectedCommit: Array<mixed>) => {
-        batch._defer = false;
-        NoopRenderer.flushRoot(root, expiration);
-        expect(Scheduler.unstable_clearYields()).toEqual(expectedCommit);
-      };
     },
 
     getRoot(rootID: string = DEFAULT_ROOT_ID) {
