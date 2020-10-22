@@ -26,15 +26,23 @@ import {
   ElementTypeSuspenseList,
 } from 'react-devtools-shared/src/types';
 import {
+  deletePathInObject,
   getDisplayName,
   getDefaultComponentFilters,
   getInObject,
   getUID,
+  renamePathInObject,
   setInObject,
   utfEncodeString,
 } from 'react-devtools-shared/src/utils';
 import {sessionStorageGetItem} from 'react-devtools-shared/src/storage';
-import {cleanForBridge, copyToClipboard, copyWithSet} from './utils';
+import {
+  cleanForBridge,
+  copyToClipboard,
+  copyWithDelete,
+  copyWithRename,
+  copyWithSet,
+} from './utils';
 import {
   __DEBUG__,
   SESSION_STORAGE_RELOAD_AND_PROFILE_KEY,
@@ -106,12 +114,17 @@ type ReactPriorityLevelsType = {|
 |};
 
 type ReactTypeOfSideEffectType = {|
-  NoEffect: number,
+  NoFlags: number,
   PerformedWork: number,
   Placement: number,
 |};
 
-// Some environments (e.g. React Native / Hermes) don't support the performace API yet.
+function getFiberFlags(fiber: Fiber): number {
+  // The name of this field changed from "effectTag" to "flags"
+  return fiber.flags !== undefined ? fiber.flags : (fiber: any).effectTag;
+}
+
+// Some environments (e.g. React Native / Hermes) don't support the performance API yet.
 const getCurrentTime =
   typeof performance === 'object' && typeof performance.now === 'function'
     ? () => performance.now()
@@ -127,7 +140,7 @@ export function getInternalReactConstants(
   ReactTypeOfWork: WorkTagMap,
 |} {
   const ReactTypeOfSideEffect: ReactTypeOfSideEffectType = {
-    NoEffect: 0b00,
+    NoFlags: 0b00,
     PerformedWork: 0b01,
     Placement: 0b10,
   };
@@ -153,7 +166,8 @@ export function getInternalReactConstants(
   // **********************************************************
   // The section below is copied from files in React repo.
   // Keep it in sync, and add version guards if it changes.
-  if (gte(version, '16.6.0-beta.0')) {
+  if (gte(version, '17.0.0-alpha')) {
+    // TODO (Offscreen) Update the version number above to reflect the first Offscreen alpha/beta release.
     ReactTypeOfWork = {
       Block: 22,
       ClassComponent: 1,
@@ -174,6 +188,35 @@ export function getInternalReactConstants(
       LazyComponent: 16,
       MemoComponent: 14,
       Mode: 8,
+      OffscreenComponent: 23, // Experimental
+      Profiler: 12,
+      SimpleMemoComponent: 15,
+      SuspenseComponent: 13,
+      SuspenseListComponent: 19, // Experimental
+      YieldComponent: -1, // Removed
+    };
+  } else if (gte(version, '16.6.0-beta.0')) {
+    ReactTypeOfWork = {
+      Block: 22,
+      ClassComponent: 1,
+      ContextConsumer: 9,
+      ContextProvider: 10,
+      CoroutineComponent: -1, // Removed
+      CoroutineHandlerPhase: -1, // Removed
+      DehydratedSuspenseComponent: 18, // Behind a flag
+      ForwardRef: 11,
+      Fragment: 7,
+      FunctionComponent: 0,
+      HostComponent: 5,
+      HostPortal: 4,
+      HostRoot: 3,
+      HostText: 6,
+      IncompleteClassComponent: 17,
+      IndeterminateComponent: 2,
+      LazyComponent: 16,
+      MemoComponent: 14,
+      Mode: 8,
+      OffscreenComponent: -1, // Experimental
       Profiler: 12,
       SimpleMemoComponent: 15,
       SuspenseComponent: 13,
@@ -201,6 +244,7 @@ export function getInternalReactConstants(
       LazyComponent: -1, // Doesn't exist yet
       MemoComponent: -1, // Doesn't exist yet
       Mode: 10,
+      OffscreenComponent: -1, // Experimental
       Profiler: 15,
       SimpleMemoComponent: -1, // Doesn't exist yet
       SuspenseComponent: 16,
@@ -228,6 +272,7 @@ export function getInternalReactConstants(
       LazyComponent: -1, // Doesn't exist yet
       MemoComponent: -1, // Doesn't exist yet
       Mode: 11,
+      OffscreenComponent: -1, // Experimental
       Profiler: 15,
       SimpleMemoComponent: -1, // Doesn't exist yet
       SuspenseComponent: 16,
@@ -384,7 +429,7 @@ export function attach(
     ReactTypeOfWork,
     ReactTypeOfSideEffect,
   } = getInternalReactConstants(renderer.version);
-  const {NoEffect, PerformedWork, Placement} = ReactTypeOfSideEffect;
+  const {NoFlags, PerformedWork, Placement} = ReactTypeOfSideEffect;
   const {
     FunctionComponent,
     ClassComponent,
@@ -399,6 +444,7 @@ export function attach(
     IncompleteClassComponent,
     IndeterminateComponent,
     MemoComponent,
+    OffscreenComponent,
     SimpleMemoComponent,
     SuspenseComponent,
     SuspenseListComponent,
@@ -414,7 +460,11 @@ export function attach(
 
   const {
     overrideHookState,
+    overrideHookStateDeletePath,
+    overrideHookStateRenamePath,
     overrideProps,
+    overridePropsDeletePath,
+    overridePropsRenamePath,
     setSuspenseHandler,
     scheduleUpdate,
   } = renderer;
@@ -430,25 +480,34 @@ export function attach(
   if (process.env.NODE_ENV !== 'test') {
     registerRendererWithConsole(renderer);
 
-    // The renderer interface can't read this preference directly,
+    // The renderer interface can't read these preferences directly,
     // because it is stored in localStorage within the context of the extension.
     // It relies on the extension to pass the preference through via the global.
-    if (window.__REACT_DEVTOOLS_APPEND_COMPONENT_STACK__ !== false) {
-      patchConsole();
+    const appendComponentStack =
+      window.__REACT_DEVTOOLS_APPEND_COMPONENT_STACK__ !== false;
+    const breakOnConsoleErrors =
+      window.__REACT_DEVTOOLS_BREAK_ON_CONSOLE_ERRORS__ === true;
+    if (appendComponentStack || breakOnConsoleErrors) {
+      patchConsole({
+        appendComponentStack,
+        breakOnConsoleErrors,
+      });
     }
   }
 
   const debug = (name: string, fiber: Fiber, parentFiber: ?Fiber): void => {
     if (__DEBUG__) {
       const displayName = getDisplayNameForFiber(fiber) || 'null';
+      const id = getFiberID(fiber);
       const parentDisplayName =
         (parentFiber != null && getDisplayNameForFiber(parentFiber)) || 'null';
+      const parentID = parentFiber ? getFiberID(parentFiber) : '';
       // NOTE: calling getFiberID or getPrimaryFiber is unsafe here
       // because it will put them in the map. For now, we'll omit them.
       // TODO: better debugging story for this.
       console.log(
-        `[renderer] %c${name} %c${displayName} %c${
-          parentFiber ? parentDisplayName : ''
+        `[renderer] %c${name} %c${displayName} (${id}) %c${
+          parentFiber ? `${parentDisplayName} (${parentID})` : ''
         }`,
         'color: red; font-weight: bold;',
         'color: blue;',
@@ -521,7 +580,7 @@ export function attach(
 
   // If necessary, we can revisit optimizing this operation.
   // For example, we could add a new recursive unmount tree operation.
-  // The unmount operations are already significantly smaller than mount opreations though.
+  // The unmount operations are already significantly smaller than mount operations though.
   // This is something to keep in mind for later.
   function updateComponentFilters(componentFilters: Array<ComponentFilter>) {
     if (isProfiling) {
@@ -540,7 +599,7 @@ export function attach(
 
     applyComponentFilters(componentFilters);
 
-    // Reset psuedo counters so that new path selections will be persisted.
+    // Reset pseudo counters so that new path selections will be persisted.
     rootDisplayNameCounter.clear();
 
     // Recursively re-mount all roots with new filter criteria applied.
@@ -568,6 +627,7 @@ export function attach(
       case HostPortal:
       case HostText:
       case Fragment:
+      case OffscreenComponent:
         return true;
       case HostRoot:
         // It is never valid to filter the root element.
@@ -798,7 +858,7 @@ export function attach(
 
   // Record all contexts at the time profiling is started.
   // Fibers only store the current context value,
-  // so we need to track them separatenly in order to determine changed keys.
+  // so we need to track them separately in order to determine changed keys.
   function crawlToInitializeContextsMap(fiber: Fiber) {
     updateContextsForFiber(fiber);
     let current = fiber.child;
@@ -901,7 +961,7 @@ export function attach(
         // For types that execute user code, we check PerformedWork effect.
         // We don't reflect bailouts (either referential or sCU) in DevTools.
         // eslint-disable-next-line no-bitwise
-        return (nextFiber.effectTag & PerformedWork) === PerformedWork;
+        return (getFiberFlags(nextFiber) & PerformedWork) === PerformedWork;
       // Note: ContextConsumer only gets PerformedWork effect in 16.3.3+
       // so it won't get highlighted with React 16.3.0 to 16.3.2.
       default:
@@ -949,7 +1009,7 @@ export function attach(
       // (1) an initial tree snapshot and
       // (2) the operations array for each commit
       // Because of this, it's important that the operations and metadata arrays align,
-      // So it's important not to ommit even empty operations while profiing is active.
+      // So it's important not to omit even empty operations while profiling is active.
       if (!isProfiling) {
         return;
       }
@@ -1064,6 +1124,10 @@ export function attach(
   }
 
   function recordMount(fiber: Fiber, parentFiber: Fiber | null) {
+    if (__DEBUG__) {
+      debug('recordMount()', fiber, parentFiber);
+    }
+
     const isRoot = fiber.tag === HostRoot;
     const id = getFiberID(getPrimaryFiber(fiber));
 
@@ -1118,6 +1182,10 @@ export function attach(
   }
 
   function recordUnmount(fiber: Fiber, isSimulated: boolean) {
+    if (__DEBUG__) {
+      debug('recordUnmount()', fiber);
+    }
+
     if (trackedPathMatchFiber !== null) {
       // We're in the process of trying to restore previous selection.
       // If this fiber matched but is being unmounted, there's no use trying.
@@ -1144,7 +1212,7 @@ export function attach(
     }
     const id = getFiberID(primaryFiber);
     if (isRoot) {
-      // Roots must be removed only after all children (pending and simultated) have been removed.
+      // Roots must be removed only after all children (pending and simulated) have been removed.
       // So we track it separately.
       pendingUnmountedRootID = id;
     } else if (!shouldFilterFiber(fiber)) {
@@ -1203,28 +1271,45 @@ export function attach(
       // because we don't want to highlight every host node inside of a newly mounted subtree.
     }
 
-    const isTimedOutSuspense =
-      fiber.tag === ReactTypeOfWork.SuspenseComponent &&
-      fiber.memoizedState !== null;
-
-    if (isTimedOutSuspense) {
-      // Special case: if Suspense mounts in a timed-out state,
-      // get the fallback child from the inner fragment and mount
-      // it as if it was our own child. Updates handle this too.
-      const primaryChildFragment = fiber.child;
-      const fallbackChildFragment = primaryChildFragment
-        ? primaryChildFragment.sibling
-        : null;
-      const fallbackChild = fallbackChildFragment
-        ? fallbackChildFragment.child
-        : null;
-      if (fallbackChild !== null) {
-        mountFiberRecursively(
-          fallbackChild,
-          shouldIncludeInTree ? fiber : parentFiber,
-          true,
-          traceNearestHostComponentUpdate,
-        );
+    const isSuspense = fiber.tag === ReactTypeOfWork.SuspenseComponent;
+    if (isSuspense) {
+      const isTimedOut = fiber.memoizedState !== null;
+      if (isTimedOut) {
+        // Special case: if Suspense mounts in a timed-out state,
+        // get the fallback child from the inner fragment and mount
+        // it as if it was our own child. Updates handle this too.
+        const primaryChildFragment = fiber.child;
+        const fallbackChildFragment = primaryChildFragment
+          ? primaryChildFragment.sibling
+          : null;
+        const fallbackChild = fallbackChildFragment
+          ? fallbackChildFragment.child
+          : null;
+        if (fallbackChild !== null) {
+          mountFiberRecursively(
+            fallbackChild,
+            shouldIncludeInTree ? fiber : parentFiber,
+            true,
+            traceNearestHostComponentUpdate,
+          );
+        }
+      } else {
+        let primaryChild: Fiber | null = null;
+        const areSuspenseChildrenConditionallyWrapped =
+          OffscreenComponent === -1;
+        if (areSuspenseChildrenConditionallyWrapped) {
+          primaryChild = fiber.child;
+        } else if (fiber.child !== null) {
+          primaryChild = fiber.child.child;
+        }
+        if (primaryChild !== null) {
+          mountFiberRecursively(
+            primaryChild,
+            shouldIncludeInTree ? fiber : parentFiber,
+            true,
+            traceNearestHostComponentUpdate,
+          );
+        }
       }
     } else {
       if (fiber.child !== null) {
@@ -1295,7 +1380,7 @@ export function attach(
       const {alternate} = fiber;
 
       // It's important to update treeBaseDuration even if the current Fiber did not render,
-      // becuase it's possible that one of its descednants did.
+      // because it's possible that one of its descendants did.
       if (
         alternate == null ||
         treeBaseDuration !== alternate.treeBaseDuration
@@ -1352,12 +1437,15 @@ export function attach(
   }
 
   function recordResetChildren(fiber: Fiber, childSet: Fiber) {
+    if (__DEBUG__) {
+      debug('recordResetChildren()', childSet, fiber);
+    }
     // The frontend only really cares about the displayName, key, and children.
     // The first two don't really change, so we are only concerned with the order of children here.
     // This is trickier than a simple comparison though, since certain types of fibers are filtered.
     const nextChildren: Array<number> = [];
 
-    // This is a naive implimentation that shallowly recurses children.
+    // This is a naive implementation that shallowly recourses children.
     // We might want to revisit this if it proves to be too inefficient.
     let child = childSet;
     while (child !== null) {
@@ -1386,6 +1474,23 @@ export function attach(
       nextChildren.push(getFiberID(getPrimaryFiber(fiber)));
     } else {
       let child = fiber.child;
+      const isTimedOutSuspense =
+        fiber.tag === SuspenseComponent && fiber.memoizedState !== null;
+      if (isTimedOutSuspense) {
+        // Special case: if Suspense mounts in a timed-out state,
+        // get the fallback child from the inner fragment,
+        // and skip over the primary child.
+        const primaryChildFragment = fiber.child;
+        const fallbackChildFragment = primaryChildFragment
+          ? primaryChildFragment.sibling
+          : null;
+        const fallbackChild = fallbackChildFragment
+          ? fallbackChildFragment.child
+          : null;
+        if (fallbackChild !== null) {
+          child = fallbackChild;
+        }
+      }
       while (child !== null) {
         findReorderedChildrenRecursively(child, nextChildren);
         child = child.sibling;
@@ -1451,7 +1556,7 @@ export function attach(
     // Suspense components only have a non-null memoizedState if they're timed-out.
     const prevDidTimeout = isSuspense && prevFiber.memoizedState !== null;
     const nextDidTimeOut = isSuspense && nextFiber.memoizedState !== null;
-    // The logic below is inspired by the codepaths in updateSuspenseComponent()
+    // The logic below is inspired by the code paths in updateSuspenseComponent()
     // inside ReactFiberBeginWork in the React source code.
     if (prevDidTimeout && nextDidTimeOut) {
       // Fallback -> Fallback:
@@ -1487,7 +1592,7 @@ export function attach(
       if (nextPrimaryChildSet !== null) {
         mountFiberRecursively(
           nextPrimaryChildSet,
-          nextFiber,
+          shouldIncludeInTree ? nextFiber : parentFiber,
           true,
           traceNearestHostComponentUpdate,
         );
@@ -1507,7 +1612,7 @@ export function attach(
       if (nextFallbackChildSet != null) {
         mountFiberRecursively(
           nextFallbackChildSet,
-          nextFiber,
+          shouldIncludeInTree ? nextFiber : parentFiber,
           true,
           traceNearestHostComponentUpdate,
         );
@@ -1515,7 +1620,7 @@ export function attach(
       }
     } else {
       // Common case: Primary -> Primary.
-      // This is the same codepath as for non-Suspense fibers.
+      // This is the same code path as for non-Suspense fibers.
       if (nextFiber.child !== prevFiber.child) {
         // If the first child is different, we need to traverse them.
         // Each next child will be either a new child (mount) or an alternate (update).
@@ -1571,7 +1676,7 @@ export function attach(
       } else {
         if (traceUpdatesEnabled) {
           // If we're tracing updates and we've bailed out before reaching a host node,
-          // we should fall back to recursively marking the nearest host descendates for highlight.
+          // we should fall back to recursively marking the nearest host descendants for highlight.
           if (traceNearestHostComponentUpdate) {
             const hostFibers = findAllCurrentHostFibers(
               getFiberID(getPrimaryFiber(nextFiber)),
@@ -1860,12 +1965,12 @@ export function attach(
     if (!fiber.alternate) {
       // If there is no alternate, this might be a new tree that isn't inserted
       // yet. If it is, then it will have a pending insertion effect on it.
-      if ((node.effectTag & Placement) !== NoEffect) {
+      if ((getFiberFlags(node) & Placement) !== NoFlags) {
         return MOUNTING;
       }
       while (node.return) {
         node = node.return;
-        if ((node.effectTag & Placement) !== NoEffect) {
+        if ((getFiberFlags(node) & Placement) !== NoFlags) {
           return MOUNTING;
         }
       }
@@ -2146,14 +2251,10 @@ export function attach(
       key,
       memoizedProps,
       memoizedState,
+      dependencies,
       tag,
       type,
     } = fiber;
-
-    const dependencies =
-      (fiber: any).dependencies ||
-      (fiber: any).dependencies_old ||
-      (fiber: any).dependencies_new;
 
     const elementType = getElementTypeForFiber(fiber);
 
@@ -2278,14 +2379,32 @@ export function attach(
       }
     }
 
+    let rootType = null;
+    let current = fiber;
+    while (current.return !== null) {
+      current = current.return;
+    }
+    const fiberRoot = current.stateNode;
+    if (fiberRoot != null && fiberRoot._debugRootType !== null) {
+      rootType = fiberRoot._debugRootType;
+    }
+
     return {
       id,
 
-      // Does the current renderer support editable hooks?
+      // Does the current renderer support editable hooks and function props?
       canEditHooks: typeof overrideHookState === 'function',
-
-      // Does the current renderer support editable function props?
       canEditFunctionProps: typeof overrideProps === 'function',
+
+      // Does the current renderer support advanced editing interface?
+      canEditHooksAndDeletePaths:
+        typeof overrideHookStateDeletePath === 'function',
+      canEditHooksAndRenamePaths:
+        typeof overrideHookStateRenamePath === 'function',
+      canEditFunctionPropsDeletePaths:
+        typeof overridePropsDeletePath === 'function',
+      canEditFunctionPropsRenamePaths:
+        typeof overridePropsRenamePath === 'function',
 
       canToggleSuspense:
         supportsTogglingSuspense &&
@@ -2316,8 +2435,12 @@ export function attach(
       // List of owners
       owners,
 
-      // Location of component in source coude.
+      // Location of component in source code.
       source: _debugSource || null,
+
+      rootType,
+      rendererPackageName: renderer.rendererPackageName,
+      rendererVersion: renderer.version,
     };
   }
 
@@ -2345,13 +2468,13 @@ export function attach(
     });
   }
 
-  function createIsPathWhitelisted(
+  function createIsPathAllowed(
     key: string | null,
     secondaryCategory: 'hooks' | null,
   ) {
     // This function helps prevent previously-inspected paths from being dehydrated in updates.
     // This is important to avoid a bad user experience where expanded toggles collapse on update.
-    return function isPathWhitelisted(path: Array<string | number>): boolean {
+    return function isPathAllowed(path: Array<string | number>): boolean {
       switch (secondaryCategory) {
         case 'hooks':
           if (path.length === 1) {
@@ -2493,7 +2616,7 @@ export function attach(
               ((mostRecentlyInspectedElement: any): InspectedElement),
               path,
             ),
-            createIsPathWhitelisted(null, secondaryCategory),
+            createIsPathAllowed(null, secondaryCategory),
             path,
           ),
         };
@@ -2529,7 +2652,7 @@ export function attach(
 
       // Any time an inspected element has an update,
       // we should update the selected $r value as wel.
-      // Do this before dehyration (cleanForBridge).
+      // Do this before dehydration (cleanForBridge).
       updateSelectedElement(mostRecentlyInspectedElement);
 
       // Clone before cleaning so that we preserve the full data.
@@ -2538,19 +2661,19 @@ export function attach(
       const cleanedInspectedElement = {...mostRecentlyInspectedElement};
       cleanedInspectedElement.context = cleanForBridge(
         cleanedInspectedElement.context,
-        createIsPathWhitelisted('context', null),
+        createIsPathAllowed('context', null),
       );
       cleanedInspectedElement.hooks = cleanForBridge(
         cleanedInspectedElement.hooks,
-        createIsPathWhitelisted('hooks', 'hooks'),
+        createIsPathAllowed('hooks', 'hooks'),
       );
       cleanedInspectedElement.props = cleanForBridge(
         cleanedInspectedElement.props,
-        createIsPathWhitelisted('props', null),
+        createIsPathAllowed('props', null),
       );
       cleanedInspectedElement.state = cleanForBridge(
         cleanedInspectedElement.state,
-        createIsPathWhitelisted('state', null),
+        createIsPathAllowed('state', null),
       );
 
       return {
@@ -2604,60 +2727,188 @@ export function attach(
     }
   }
 
-  function setInHook(
+  function deletePath(
+    type: 'context' | 'hooks' | 'props' | 'state',
     id: number,
-    index: number,
+    hookID: ?number,
+    path: Array<string | number>,
+  ): void {
+    const fiber = findCurrentFiberUsingSlowPathById(id);
+    if (fiber !== null) {
+      const instance = fiber.stateNode;
+
+      switch (type) {
+        case 'context':
+          // To simplify hydration and display of primitive context values (e.g. number, string)
+          // the inspectElement() method wraps context in a {value: ...} object.
+          // We need to remove the first part of the path (the "value") before continuing.
+          path = path.slice(1);
+
+          switch (fiber.tag) {
+            case ClassComponent:
+              if (path.length === 0) {
+                // Simple context value (noop)
+              } else {
+                deletePathInObject(instance.context, path);
+              }
+              instance.forceUpdate();
+              break;
+            case FunctionComponent:
+              // Function components using legacy context are not editable
+              // because there's no instance on which to create a cloned, mutated context.
+              break;
+          }
+          break;
+        case 'hooks':
+          if (typeof overrideHookStateDeletePath === 'function') {
+            overrideHookStateDeletePath(fiber, ((hookID: any): number), path);
+          }
+          break;
+        case 'props':
+          if (instance === null) {
+            if (typeof overridePropsDeletePath === 'function') {
+              overridePropsDeletePath(fiber, path);
+            }
+          } else {
+            fiber.pendingProps = copyWithDelete(instance.props, path);
+            instance.forceUpdate();
+          }
+          break;
+        case 'state':
+          deletePathInObject(instance.state, path);
+          instance.forceUpdate();
+          break;
+      }
+    }
+  }
+
+  function renamePath(
+    type: 'context' | 'hooks' | 'props' | 'state',
+    id: number,
+    hookID: ?number,
+    oldPath: Array<string | number>,
+    newPath: Array<string | number>,
+  ): void {
+    const fiber = findCurrentFiberUsingSlowPathById(id);
+    if (fiber !== null) {
+      const instance = fiber.stateNode;
+
+      switch (type) {
+        case 'context':
+          // To simplify hydration and display of primitive context values (e.g. number, string)
+          // the inspectElement() method wraps context in a {value: ...} object.
+          // We need to remove the first part of the path (the "value") before continuing.
+          oldPath = oldPath.slice(1);
+          newPath = newPath.slice(1);
+
+          switch (fiber.tag) {
+            case ClassComponent:
+              if (oldPath.length === 0) {
+                // Simple context value (noop)
+              } else {
+                renamePathInObject(instance.context, oldPath, newPath);
+              }
+              instance.forceUpdate();
+              break;
+            case FunctionComponent:
+              // Function components using legacy context are not editable
+              // because there's no instance on which to create a cloned, mutated context.
+              break;
+          }
+          break;
+        case 'hooks':
+          if (typeof overrideHookStateRenamePath === 'function') {
+            overrideHookStateRenamePath(
+              fiber,
+              ((hookID: any): number),
+              oldPath,
+              newPath,
+            );
+          }
+          break;
+        case 'props':
+          if (instance === null) {
+            if (typeof overridePropsRenamePath === 'function') {
+              overridePropsRenamePath(fiber, oldPath, newPath);
+            }
+          } else {
+            fiber.pendingProps = copyWithRename(
+              instance.props,
+              oldPath,
+              newPath,
+            );
+            instance.forceUpdate();
+          }
+          break;
+        case 'state':
+          renamePathInObject(instance.state, oldPath, newPath);
+          instance.forceUpdate();
+          break;
+      }
+    }
+  }
+
+  function overrideValueAtPath(
+    type: 'context' | 'hooks' | 'props' | 'state',
+    id: number,
+    hookID: ?number,
     path: Array<string | number>,
     value: any,
-  ) {
-    const fiber = findCurrentFiberUsingSlowPathById(id);
-    if (fiber !== null) {
-      if (typeof overrideHookState === 'function') {
-        overrideHookState(fiber, index, path, value);
-      }
-    }
-  }
-
-  function setInProps(id: number, path: Array<string | number>, value: any) {
+  ): void {
     const fiber = findCurrentFiberUsingSlowPathById(id);
     if (fiber !== null) {
       const instance = fiber.stateNode;
-      if (instance === null) {
-        if (typeof overrideProps === 'function') {
-          overrideProps(fiber, path, value);
-        }
-      } else {
-        fiber.pendingProps = copyWithSet(instance.props, path, value);
-        instance.forceUpdate();
+
+      switch (type) {
+        case 'context':
+          // To simplify hydration and display of primitive context values (e.g. number, string)
+          // the inspectElement() method wraps context in a {value: ...} object.
+          // We need to remove the first part of the path (the "value") before continuing.
+          path = path.slice(1);
+
+          switch (fiber.tag) {
+            case ClassComponent:
+              if (path.length === 0) {
+                // Simple context value
+                instance.context = value;
+              } else {
+                setInObject(instance.context, path, value);
+              }
+              instance.forceUpdate();
+              break;
+            case FunctionComponent:
+              // Function components using legacy context are not editable
+              // because there's no instance on which to create a cloned, mutated context.
+              break;
+          }
+          break;
+        case 'hooks':
+          if (typeof overrideHookState === 'function') {
+            overrideHookState(fiber, ((hookID: any): number), path, value);
+          }
+          break;
+        case 'props':
+          switch (fiber.tag) {
+            case ClassComponent:
+              fiber.pendingProps = copyWithSet(instance.props, path, value);
+              instance.forceUpdate();
+              break;
+            default:
+              if (typeof overrideProps === 'function') {
+                overrideProps(fiber, path, value);
+              }
+              break;
+          }
+          break;
+        case 'state':
+          switch (fiber.tag) {
+            case ClassComponent:
+              setInObject(instance.state, path, value);
+              instance.forceUpdate();
+              break;
+          }
+          break;
       }
-    }
-  }
-
-  function setInState(id: number, path: Array<string | number>, value: any) {
-    const fiber = findCurrentFiberUsingSlowPathById(id);
-    if (fiber !== null) {
-      const instance = fiber.stateNode;
-      setInObject(instance.state, path, value);
-      instance.forceUpdate();
-    }
-  }
-
-  function setInContext(id: number, path: Array<string | number>, value: any) {
-    // To simplify hydration and display of primative context values (e.g. number, string)
-    // the inspectElement() method wraps context in a {value: ...} object.
-    // We need to remove the first part of the path (the "value") before continuing.
-    path = path.slice(1);
-
-    const fiber = findCurrentFiberUsingSlowPathById(id);
-    if (fiber !== null) {
-      const instance = fiber.stateNode;
-      if (path.length === 0) {
-        // Simple context value
-        instance.context = value;
-      } else {
-        setInObject(instance.context, path, value);
-      }
-      instance.forceUpdate();
     }
   }
 
@@ -2808,7 +3059,7 @@ export function attach(
       if (shouldRecordChangeDescriptions) {
         // Record all contexts at the time profiling is started.
         // Fibers only store the current context value,
-        // so we need to track them separatenly in order to determine changed keys.
+        // so we need to track them separately in order to determine changed keys.
         crawlToInitializeContextsMap(root.current);
       }
     });
@@ -3109,6 +3360,7 @@ export function attach(
   return {
     cleanup,
     copyElementPath,
+    deletePath,
     findNativeNodesForFiberID,
     flushInitialOperations,
     getBestMatchForTrackedPath,
@@ -3125,11 +3377,9 @@ export function attach(
     prepareViewAttributeSource,
     prepareViewElementSource,
     overrideSuspense,
+    overrideValueAtPath,
+    renamePath,
     renderer,
-    setInContext,
-    setInHook,
-    setInProps,
-    setInState,
     setTraceUpdatesEnabled,
     setTrackedPath,
     startProfiling,

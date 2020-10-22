@@ -18,7 +18,7 @@ const DEVTOOLS_VERSION = getVersionString();
 
 module.exports = {
   mode: __DEV__ ? 'development' : 'production',
-  devtool: __DEV__ ? 'cheap-module-eval-source-map' : false,
+  devtool: __DEV__ ? 'cheap-module-eval-source-map' : 'source-map',
   entry: {
     backend: './src/backend.js',
   },
@@ -38,6 +38,9 @@ module.exports = {
       'react-is': resolve(builtModulesDir, 'react-is'),
       scheduler: resolve(builtModulesDir, 'scheduler'),
     },
+  },
+  optimization: {
+    minimize: false,
   },
   plugins: [
     new DefinePlugin({

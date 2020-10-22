@@ -29,7 +29,7 @@ describe('ReactFresh', () => {
       ReactFreshRuntime.injectIntoGlobalHook(global);
       ReactDOM = require('react-dom');
       Scheduler = require('scheduler');
-      act = require('react-dom/test-utils').act;
+      act = require('react-dom/test-utils').unstable_concurrentAct;
       createReactClass = require('create-react-class/factory')(
         React.Component,
         React.isValidElement,
@@ -75,27 +75,17 @@ describe('ReactFresh', () => {
     return type;
   }
 
-  // TODO: Delete this once new API exists in both forks
-  function LegacyHiddenDiv({hidden, children, ...props}) {
-    if (gate(flags => flags.new)) {
-      return (
-        <div
-          hidden={hidden ? 'unstable-do-not-use-legacy-hidden' : false}
-          {...props}>
-          <React.unstable_LegacyHidden mode={hidden ? 'hidden' : 'visible'}>
-            {children}
-          </React.unstable_LegacyHidden>
-        </div>
-      );
-    } else {
-      return (
-        <div
-          hidden={hidden ? 'unstable-do-not-use-legacy-hidden' : false}
-          {...props}>
+  // Note: This is based on a similar component we use in www. We can delete
+  // once the extra div wrapper is no longer neccessary.
+  function LegacyHiddenDiv({children, mode}) {
+    return (
+      <div hidden={mode === 'hidden'}>
+        <React.unstable_LegacyHidden
+          mode={mode === 'hidden' ? 'unstable-defer-without-hiding' : mode}>
           {children}
-        </div>
-      );
-    }
+        </React.unstable_LegacyHidden>
+      </div>
+    );
   }
 
   it('can preserve state for compatible types', () => {
@@ -2440,7 +2430,7 @@ describe('ReactFresh', () => {
             Scheduler.unstable_yieldValue('App#layout');
           });
           return (
-            <LegacyHiddenDiv hidden={offscreen}>
+            <LegacyHiddenDiv mode={offscreen ? 'hidden' : 'visible'}>
               <Hello />
             </LegacyHiddenDiv>
           );
@@ -3622,11 +3612,26 @@ describe('ReactFresh', () => {
       const useStore = () => {};
       expect(ReactFreshRuntime.isLikelyComponentType(useStore)).toBe(false);
       expect(ReactFreshRuntime.isLikelyComponentType(useTheme)).toBe(false);
+      const rogueProxy = new Proxy(
+        {},
+        {
+          get(target, property) {
+            throw new Error();
+          },
+        },
+      );
+      expect(ReactFreshRuntime.isLikelyComponentType(rogueProxy)).toBe(false);
 
       // These seem like function components.
       const Button = () => {};
       expect(ReactFreshRuntime.isLikelyComponentType(Button)).toBe(true);
       expect(ReactFreshRuntime.isLikelyComponentType(Widget)).toBe(true);
+      const ProxyButton = new Proxy(Button, {
+        get(target, property) {
+          return target[property];
+        },
+      });
+      expect(ReactFreshRuntime.isLikelyComponentType(ProxyButton)).toBe(true);
       const anon = (() => () => {})();
       anon.displayName = 'Foo';
       expect(ReactFreshRuntime.isLikelyComponentType(anon)).toBe(true);
@@ -3634,8 +3639,14 @@ describe('ReactFresh', () => {
       // These seem like class components.
       class Btn extends React.Component {}
       class PureBtn extends React.PureComponent {}
+      const ProxyBtn = new Proxy(Btn, {
+        get(target, property) {
+          return target[property];
+        },
+      });
       expect(ReactFreshRuntime.isLikelyComponentType(Btn)).toBe(true);
       expect(ReactFreshRuntime.isLikelyComponentType(PureBtn)).toBe(true);
+      expect(ReactFreshRuntime.isLikelyComponentType(ProxyBtn)).toBe(true);
       expect(
         ReactFreshRuntime.isLikelyComponentType(
           createReactClass({render() {}}),
@@ -3758,7 +3769,7 @@ describe('ReactFresh', () => {
       React = require('react');
       ReactDOM = require('react-dom');
       Scheduler = require('scheduler');
-      act = require('react-dom/test-utils').act;
+      act = require('react-dom/test-utils').unstable_concurrentAct;
 
       // Important! Inject into the global hook *after* ReactDOM runs:
       ReactFreshRuntime = require('react-refresh/runtime');
